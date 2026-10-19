@@ -1,0 +1,69 @@
+# ==============================================================================
+# nginx configuration template - one per instance
+# ==============================================================================
+# The build renders this file with the instance's own values and writes
+# dist/nginx/<instance>.conf. Nothing in here is a literal port: every
+# number comes from the port map of the instance that renders it, so two
+# instances on one machine never fight over a port.
+#
+# Placeholders
+#   {{INSTANCE}}         instance name
+#   {{PUBLIC_DOMAINS}}   space separated hostnames this instance answers to
+#   {{CA_CERT}}          project CA certificate (trust anchor)
+#   {{#SERVICES}}        repeated once per service
+#     {{NAME}}           service name
+#     {{DESC}}           one line description
+#     {{HTTP_PORT}}      loopback port of the Node service
+#     {{TLS_PORT}}       TLS port of the nginx terminator
+#     {{CERT}}           certificate of this service
+#     {{KEY}}            private key of this service
+#     {{SERVER_NAMES}}   hostnames routed to this service
+#   {{/SERVICES}}
+# ==============================================================================
+
+# This file is included INSIDE the http{} context, exactly like an
+# /etc/nginx/sites-enabled file. It therefore declares ONLY what a site
+# owns: the trust anchor and the server blocks. Everything the main
+# context already sets (mime types, default_type, temp paths, timeouts)
+# is left to it, otherwise nginx refuses the file as a duplicate.
+#
+# A standalone instance wraps this file with the main context - see
+# scripts/build/lib/certs.mjs writeNginxRootConf().
+
+# The project CA is the only trust anchor this instance uses.
+ssl_client_certificate {{CA_CERT}};
+ssl_trusted_certificate {{CA_CERT}};
+
+{{#SERVICES}}
+    # ── {{NAME}} — {{DESC}}
+    server {
+        listen              {{TLS_PORT}} ssl;
+        listen              [::]:{{TLS_PORT}} ssl;
+        server_name         {{SERVER_NAMES}};
+
+        ssl_certificate     {{CERT}};
+        ssl_certificate_key {{KEY}};
+        ssl_protocols       TLSv1.2 TLSv1.3;
+        ssl_prefer_server_ciphers off;
+        ssl_session_cache   shared:{{NAME}}_SSL:10m;
+        ssl_session_timeout 1h;
+
+        add_header Strict-Transport-Security "max-age=31536000" always;
+        add_header X-Content-Type-Options nosniff always;
+        add_header X-Frame-Options SAMEORIGIN always;
+
+        client_max_body_size 32m;
+
+        location / {
+            proxy_pass         http://127.0.0.1:{{HTTP_PORT}};
+            proxy_http_version 1.1;
+            proxy_set_header   Host $host;
+            proxy_set_header   X-Real-IP $remote_addr;
+            proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header   X-Forwarded-Proto https;
+            proxy_read_timeout 300s;
+            proxy_send_timeout 300s;
+        }
+    }
+
+{{/SERVICES}}

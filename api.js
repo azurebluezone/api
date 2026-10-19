@@ -110,6 +110,7 @@ const {
   compactToolsText,
 } = require("./tools/context-slimmer.js");
 const { makeAliasResolver } = require("./tools/model-alias.js");
+const { PORTS } = require("./config/ports.js");
 const { loadAgentFiles, getAgentById, listAgentIds } = require("./agent");
 
 // ─── MCP gateway route table (deny-by-default) ─────────────────────────
@@ -225,7 +226,7 @@ const {
 })();
 
 // ─── Config ──────────────────────────────────────────────────
-const PORT = parseInt(process.env.PORT || "3000", 10);
+const PORT = PORTS.api;   // config/ports.js — the only place a port is decided
 const MAX_BODY_SIZE = parseInt(
   process.env.MAX_BODY_SIZE || String(10 * 1024 * 1024),
   10
@@ -9960,7 +9961,7 @@ const MCP_TOOLS = {
       target: {
         type: "string",
         description:
-          "File path or URL to open in the browser (e.g., /abs/path/file.html or http://localhost:3000)",
+          "File path or URL to open in the browser (e.g., /abs/path/file.html or http://localhost:<port>)",
       },
     },
     required: ["target"],

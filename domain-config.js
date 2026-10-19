@@ -38,7 +38,7 @@
 
 // ─── Default Fallback (all env-var driven) ────────────────────
 function buildDefaultConfig() {
-  const port = parseInt(process.env.PORT || "3000", 10);
+  const port = PORTS.api;   // config/ports.js
   const appUrl = process.env.APP_URL || "";
   const deployDomain = process.env.DEPLOY_DOMAIN || "";
 

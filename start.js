@@ -554,7 +554,7 @@ async function startAll() {
   // PORT must be 3000 and APP_URL must point at the public app URL.
   // Enforced even if missing from .env so the server always boots on the
   // expected port / URL.
-  process.env.PORT = process.env.PORT || "3000";
+  process.env.PORT = process.env.PORT || String(PORTS.api);
   // APP_URL: derive from DEPLOY_DOMAIN if not set, don't hardcode
   if (!process.env.APP_URL) {
     const domain = process.env.DEPLOY_DOMAIN || "localhost";

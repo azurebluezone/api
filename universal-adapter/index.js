@@ -23,6 +23,7 @@
 if (process.argv.includes("--stdio")) process.env.ZC_LOG_CONSOLE = "0";
 
 const path = require("path");
+const { PORTS } = require("../config/ports.js");
 const http = require("http");
 const https = require("https");
 const { startHTTP, startHTTPS } = require("./transport-http");
@@ -32,8 +33,8 @@ const registry = require("./registry");
 const tls = require("./tls");
 const zclog = require("../lib/zc-log");
 
-const HTTP_PORT = parseInt(process.env.ADAPTER_HTTP_PORT || "5400", 10);
-const HTTPS_PORT = parseInt(process.env.ADAPTER_HTTPS_PORT || "5443", 10);
+const HTTP_PORT = PORTS.adapterHttp;
+const HTTPS_PORT = PORTS.adapterHttps;
 const HOST = process.env.ADAPTER_HOST || "127.0.0.1";
 
 const arg = (name) => process.argv.includes(name);

@@ -266,25 +266,29 @@ export function generateNginxConf({ services, certs, outFile, projectName, upstr
  * Minimal standalone nginx.conf (used with `nginx -c`) so the generated
  * server blocks can be tested without touching the system nginx config.
  */
-export function writeNginxRootConf({ includeFile, prefixDir }) {
+export function writeNginxRootConf({ includeFile, prefixDir, mimeTypes = "/etc/nginx/mime.types" }) {
+  // The main context ONLY. Everything inside the http{} context lives in
+  // the rendered site file (deploy/nginx.conf.template), so the two never
+  // declare the same directive.
   const conf = [
     `worker_processes 1;`,
     `error_log ${prefixDir}/error.log warn;`,
     `pid ${prefixDir}/nginx.pid;`,
     ``,
-    `events { worker_connections 256; }`,
+    `events { worker_connections 1024; }`,
     ``,
     `http {`,
-    `    include /etc/nginx/mime.types;`,
-    `    default_type application/octet-stream;`,
-    `    access_log ${prefixDir}/access.log;`,
+    `    include       ${mimeTypes};`,
+    `    default_type  application/octet-stream;`,
+    `    access_log            ${prefixDir}/access.log;`,
     `    client_body_temp_path ${prefixDir}/client_temp;`,
-    `    proxy_temp_path ${prefixDir}/proxy_temp;`,
-    `    fastcgi_temp_path ${prefixDir}/fastcgi_temp;`,
-    `    uwsgi_temp_path ${prefixDir}/uwsgi_temp;`,
-    `    scgi_temp_path ${prefixDir}/scgi_temp;`,
-    `    sendfile on;`,
+    `    proxy_temp_path       ${prefixDir}/proxy_temp;`,
+    `    fastcgi_temp_path     ${prefixDir}/fastcgi_temp;`,
+    `    uwsgi_temp_path       ${prefixDir}/uwsgi_temp;`,
+    `    scgi_temp_path        ${prefixDir}/scgi_temp;`,
+    `    sendfile      on;`,
     `    keepalive_timeout 65;`,
+    `    server_tokens off;`,
     `    include ${includeFile};`,
     `}`,
     ``,
@@ -292,7 +296,7 @@ export function writeNginxRootConf({ includeFile, prefixDir }) {
   const p = path.join(prefixDir, "nginx.conf");
   fs.mkdirSync(prefixDir, { recursive: true });
   fs.writeFileSync(p, conf, { mode: 0o644 });
-  for (const d of ["client_temp", "proxy_temp", "fastcgi_temp", "uwsgi_temp"]) {
+  for (const d of ["client_temp", "proxy_temp", "fastcgi_temp", "uwsgi_temp", "scgi_temp"]) {
     fs.mkdirSync(path.join(prefixDir, d), { recursive: true });
   }
   return p;

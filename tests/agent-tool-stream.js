@@ -12,7 +12,7 @@
 //
 // : node tests/agent-tool-stream.js   ( http://127.0.0.1:3000)
 // ─────────────────────────────────────────────────────────────────────
-const BASE = "http://127.0.0.1:" + (process.env.PORT || "3000");
+const BASE = "http://127.0.0.1:" + (process.env.PORT || "5050");
 const fs = require("fs");
 const path = require("path");
 

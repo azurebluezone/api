@@ -16,11 +16,14 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
-SITE="zombiecoder-ai"
+# The site name follows the project, so several instances can be installed
+# side by side (nginx routes them by server_name on the shared :443).
+PROJECT="$(basename "$ROOT")"
+SITE="$PROJECT"
 CONF="/etc/nginx/sites-available/$SITE"
 LINK="/etc/nginx/sites-enabled/$SITE"
 CA_SRC="$ROOT/dist/certs/ca-cert.pem"
-CA_DST="/usr/local/share/ca-certificates/zombiecoder-ai-local-ca.crt"
+CA_DST="/usr/local/share/ca-certificates/$PROJECT-local-ca.crt"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "ERROR: run with sudo — :443 and /etc/nginx need root." >&2

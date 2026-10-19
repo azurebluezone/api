@@ -10,7 +10,7 @@
 // Run:  node tests/runtime-verify.js
 //       (server must be running on http://127.0.0.1:3000)
 
-const BASE = "http://127.0.0.1:" + (process.env.PORT || "3000");
+const BASE = "http://127.0.0.1:" + (process.env.PORT || "5050");
 const CHAT_TIMEOUT_MS = 150000;
 
 let pass = 0, fail = 0;
