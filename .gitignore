@@ -1,0 +1,68 @@
+# ==============================================================================
+# ZombieCoder gateway - git ignore rules
+# ==============================================================================
+# Rule 1: a secret never enters the repository.
+# Rule 2: a file the system needs at runtime (source code, config templates)
+#         always enters it.
+# Rule 3: generated output never enters it.
+# ==============================================================================
+
+# ── Secrets and local configuration ────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.env
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+id_rsa
+id_ed25519
+credentials*
+secrets.*
+.npmrc
+.netrc
+*.bak
+*.bak-*
+sahon.zip
+
+# ── Runtime state (created on this machine) ─────────────────────────────
+data/
+logs/
+cache/
+locks/
+.zombiecoder/
+.missionbarisal/
+*.log
+*.db
+*.db-journal
+*.db-wal
+*.sock
+*.pid
+coverage/
+tmp/
+
+# ── Build output (per-instance ports and TLS keys live here) ───────────
+dist/
+
+# ── Dependencies ───────────────────────────────────────────────────────
+node_modules/
+# symlinked node_modules (dir pattern misses symlinks - they are files to git)
+node_modules
+package-lock.json.bak
+
+# ── Editor and OS ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# ── Test and packaging leftovers ───────────────────────────────────────
+tests/Unnecessary/
+unnecessary/
+*.zip
+*.tar
+*.tar.gz

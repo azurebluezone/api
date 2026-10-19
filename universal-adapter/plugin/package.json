@@ -1,0 +1,13 @@
+{
+  "name": "universal-bridge",
+  "version": "1.0.0",
+  "description": "OpenCode plugin that mirrors every tool from the ZombieCoder Universal Transport Adapter (HTTP + HTTPS + stdio) into the editor.",
+  "type": "module",
+  "private": true,
+  "exports": {
+    ".": "./index.ts"
+  },
+  "dependencies": {
+    "@opencode/plugin": "^2.0.22"
+  }
+}
