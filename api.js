@@ -909,6 +909,7 @@ function parseModelsEnv(str) {
 const PROVIDER_CONFIG = {
   opencode: {
     name: "OpenCode",
+    needsKey: true,
     baseUrl: process.env.OPENCODE_BASE || "https://opencode.ai/zen/v1",
     // A placeholder value ("<YOUR_..._KEY>") is not a credential. Treating it
     // as one sent a literal placeholder upstream and produced confusing 401s
@@ -929,6 +930,7 @@ const PROVIDER_CONFIG = {
   // When OpenCode fails, Groq serves as fallback.
   groq: {
     name: "Groq",
+    needsKey: true,
     baseUrl: process.env.GROQ_BASE || "https://api.groq.com/openai/v1",
     key: process.env.GROQ_API_KEY || "",
  priority: parseInt(process.env.GROQ_PRIORITY || "999", 10), // NaN-proof: unset lowest
@@ -939,6 +941,7 @@ const PROVIDER_CONFIG = {
   // Requires API key — OpenCode -> Groq -> Gemini fallback chain
   gemini: {
     name: "Gemini",
+    needsKey: true,
     baseUrl:
       process.env.GEMINI_BASE ||
       "https://generativelanguage.googleapis.com/v1beta",
@@ -997,6 +1000,7 @@ const PROVIDER_CONFIG = {
   //   without a code change.
   "ollama-cloud": {
     name: "Ollama Cloud",
+    needsKey: true,
     baseUrl: process.env.OLLAMA_CLOUD_BASE || "https://ollama.com",
     key: process.env.OLLAMA_CLOUD_API_KEY || "",
     priority: parseInt(process.env.OLLAMA_CLOUD_PRIORITY || "998", 10),
@@ -1069,6 +1073,7 @@ function loadCustomProviders() {
       name: name,
       baseUrl: url,
       key: apiKey,
+      needsKey: true,
       priority: priority,
       type: type,
       models: models,
@@ -3660,6 +3665,14 @@ async function bootstrap() {
       catalogue.push({ id, ok: false, reason: "disabled", models: 0 });
       continue;
     }
+    // A provider whose key is missing is switched OFF. It must not make a
+    // doomed request, and it must not stop the boot.
+    if (p.needsKey && !String(p.key || "").trim()) {
+      p.models = [];
+      p.enabled = false;
+      catalogue.push({ id, ok: false, reason: "no api key", models: 0 });
+      continue;
+    }
     const d = await providerRegistry.discoverModels({
       id,
       baseUrl: p.baseUrl,
@@ -3689,6 +3702,10 @@ async function bootstrap() {
   // 4) protocol check — one line per provider
   const protocols = [];
   for (const [id, p] of Object.entries(PROVIDER_CONFIG)) {
+    if (p.enabled === false) {
+      protocols.push({ id, ok: false, reason: "disabled" });
+      continue;
+    }
     if (p.enabled === false) {
       protocols.push({ id, ok: false, reason: "disabled" });
       continue;
