@@ -118,13 +118,22 @@ function main() {
       // SAN list: the service name, the PUBLIC domain (the cloud tunnel
       // connects by that name, so the certificate must cover it), localhost
       // and the loopback address.
-      // APP_URL lives in .env, not in the shell environment.
-      const appUrl = String(readProjectEnv().APP_URL || "");
-      const publicDomain =
+      // The public hostnames live in .env (PUBLIC_DOMAINS), not in the
+      // shell environment. The certificate must cover every one of them:
+      // a cloud tunnel that connects by hostname will fail the handshake
+      // if the name is missing from the SAN list.
+      const env = readProjectEnv();
+      const appUrl = String(env.APP_URL || "");
+      const primary =
         (appUrl.match(/^https?:\/\/([^/:]+)/) || [])[1] || "localhost";
+      const publicDomains = String(env.PUBLIC_DOMAINS || primary)
+        .split(",")
+        .map((d) => d.trim())
+        .filter(Boolean);
+      const publicDomain = primary;
       const hosts = [
         `${svc.name}.${PROJECT}.local`,
-        publicDomain,
+        ...publicDomains,
         "localhost",
         "127.0.0.1",
       ];
@@ -139,8 +148,8 @@ function main() {
       // Each service owns <name>.<project>.local; the public domain belongs
       // to the api service only.
       const serverNames = svc.public
-        ? `${publicDomain} ${PROJECT}.local api.${PROJECT}.local`
-        : `${svc.name}.${PROJECT}.local ${publicDomain}`;
+        ? `${publicDomains.join(" ")} ${PROJECT}.local api.${PROJECT}.local`
+        : `${svc.name}.${PROJECT}.local ${publicDomains.join(" ")}`;
       const isDefault = svc.public ? " default_server" : "";
 
       blocks.push(

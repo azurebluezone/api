@@ -14278,11 +14278,21 @@ window.__ADMIN_CONFIG = ${JSON.stringify({
       const protocol = DOMAIN_CFG.protocol || "http";
       const wsProtocol = protocol === "https" ? "wss" : "ws";
 
+      // Every hostname this instance answers to. PUBLIC_DOMAINS is the
+      // contract: the certificate SANs, the nginx server names, the CORS
+      // list and this response all read the same list, so a client never
+      // gets a hostname the edge does not serve.
+      const publicDomains = String(process.env.PUBLIC_DOMAINS || "")
+        .split(",")
+        .map((d) => d.trim())
+        .filter(Boolean);
+
       jsonResponse(res, 200, {
         origin: DOMAIN_CFG.name || "Mission Barisal Gateway",
         version: DOMAIN_CFG.version,
         url: publicUrl,
         domain: DETECTED_DOMAIN,
+        public_domains: publicDomains,
         type: DOMAIN_CFG.type,
         session: {
           verify:
