@@ -30,6 +30,7 @@ import { createRequire } from "node:module";
 import { ensureCa, ensureServiceCert, writeNginxRootConf } from "./lib/certs.mjs";
 import { renderTemplate, loadTemplate } from "./lib/nginx-template.mjs";
 import { allocatePorts } from "./lib/ports.mjs";
+import { serviceHostName, serviceHostNames, publicDomainsOf } from "./lib/hosts.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..", "..");
@@ -72,13 +73,8 @@ function instanceServices(env) {
   const primary = apiPort === "5050";
 
   // the public hostnames this instance answers to
-  const appUrl = String(env.APP_URL || "");
-  const primaryDomain =
-    (appUrl.match(/^https?:\/\/([^/:]+)/) || [])[1] || "localhost";
-  const publicDomains = String(env.PUBLIC_DOMAINS || primaryDomain)
-    .split(",")
-    .map((d) => d.trim())
-    .filter(Boolean);
+  const publicDomains = publicDomainsOf(env);
+  const primaryDomain = publicDomains[0] || "localhost";
 
   // the instance block: the primary instance keeps the host ports, a second
   // instance gets its own block so the two never collide
@@ -99,7 +95,7 @@ function instanceServices(env) {
     desc: "Gateway (api.js)",
     httpPort: apiPort,
     tlsPort: tlsPortFor("api", 0),
-    serverNames: [...publicDomains, "api." + path.basename(ROOT) + ".local"].join(" "),
+    serverNames: [...publicDomains, serviceHostName("api", path.basename(ROOT))].join(" "),
     hosts: [...publicDomains, "localhost", "127.0.0.1"],
   });
   out.push({
@@ -107,7 +103,7 @@ function instanceServices(env) {
     desc: "MCP tool endpoint (/mcp of the gateway)",
     httpPort: apiPort,
     tlsPort: tlsPortFor("mcp", 1),
-    serverNames: ["mcp." + path.basename(ROOT) + ".local"].join(" "),
+    serverNames: serviceHostName("mcp", path.basename(ROOT)),
     hosts: [...publicDomains, "localhost", "127.0.0.1"],
   });
   out.push({
@@ -115,7 +111,7 @@ function instanceServices(env) {
     desc: "local-llm-bridge (llama / ollama)",
     httpPort: env.BRIDGE_PORT || "11435",
     tlsPort: tlsPortFor("bridge", 2),
-    serverNames: ["bridge." + path.basename(ROOT) + ".local"].join(" "),
+    serverNames: serviceHostName("bridge", path.basename(ROOT)),
     hosts: [...publicDomains, "localhost", "127.0.0.1"],
   });
 
@@ -127,7 +123,7 @@ function instanceServices(env) {
       desc: s.desc || s.name,
       httpPort: String(s.port),
       tlsPort: tlsPortFor(s.name, out.length),
-      serverNames: [`${s.name}.${path.basename(ROOT)}.local`].join(" "),
+      serverNames: serviceHostName(s.name, path.basename(ROOT)),
       hosts: [...publicDomains, "localhost", "127.0.0.1"],
     });
   }

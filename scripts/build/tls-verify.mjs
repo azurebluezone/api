@@ -40,6 +40,7 @@ import {
   certCheck, certFingerprint, certNotAfter, opensslAvailable,
 } from "./lib/certs.mjs";
 import { isPortFree } from "./lib/ports.mjs";
+import { serviceHostName, serviceHostNames, publicDomainsOf } from "./lib/hosts.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..", "..");
@@ -144,6 +145,61 @@ function httpsGet({ host, port, path: urlPath, caPem, servername }) {
   });
 }
 
+/** One plain HTTP POST, used to compare a service with its own port. */
+function httpProbe({ host, port, path: urlPath = "/mcp", body = "" }) {
+  return new Promise((resolve) => {
+    const req = http.request(
+      {
+        host, port, path: urlPath, method: "POST", timeout: 8000,
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+      },
+      (res) => {
+        let d = "";
+        res.setEncoding("utf8");
+        res.on("data", (c) => (d += c));
+        res.on("end", () => {
+          let json = null;
+          try { json = JSON.parse(d); } catch { /* not JSON */ }
+          resolve({ status: res.statusCode, json });
+        });
+      },
+    );
+    req.on("timeout", () => { req.destroy(); resolve({ status: 0, error: "timeout" }); });
+    req.on("error", (e) => resolve({ status: 0, error: e.message }));
+    req.write(body);
+    req.end();
+  });
+}
+
+/** One HTTPS POST, used for the mapping check. */
+function httpsProbe({ host, port, servername, caPem, body, path: urlPath = "/mcp", method = "POST" }) {
+  return new Promise((resolve) => {
+    const req = https.request(
+      {
+        host, port, servername,
+        path: urlPath, method,
+        ca: [caPem], rejectUnauthorized: true,
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+        timeout: 8000,
+      },
+      (res) => {
+        let d = "";
+        res.setEncoding("utf8");
+        res.on("data", (c) => (d += c));
+        res.on("end", () => {
+          let json = null;
+          try { json = JSON.parse(d); } catch { /* not JSON */ }
+          resolve({ status: res.statusCode, json });
+        });
+      },
+    );
+    req.on("timeout", () => { req.destroy(); resolve({ status: 0, error: "timeout" }); });
+    req.on("error", (e) => resolve({ status: 0, error: e.message }));
+    req.write(body);
+    req.end();
+  });
+}
+
 // ── main ───────────────────────────────────────────────────────────────
 async function main() {
   const report = { startedAt: new Date().toISOString(), project: path.basename(ROOT) };
@@ -153,8 +209,28 @@ async function main() {
   try {
     step(1, "PLAN");
     const plan = readPlan();
-    report.plan = { base: plan.base, services: plan.services.length };
-    for (const s of plan.services) {
+    // The TLS ports come from the instance block, the upstreams from the
+    // LIVE services. Verifying a block that nothing runs proves nothing;
+    // the mapping check must exercise the real backends.
+    const { getMcpServers, readEnv } = await import(
+      path.join(ROOT, "tools", "mcp-registry.js")
+    );
+    const env = readEnv();
+    const livePorts = {
+      api: env.PORT || "5050",
+      mcp: env.PORT || "5050",
+      bridge: env.BRIDGE_PORT || "11435",
+    };
+    for (const m of getMcpServers()) livePorts[m.name] = String(m.port);
+    const services = plan.services
+      .filter((s) => s.tls)
+      .map((s) => ({
+        ...s,
+        livePort: livePorts[s.name] || String(s.http),
+        tlsPort: s.tls,
+      }));
+    report.plan = { base: plan.base, services: services.length };
+    for (const s of services) {
       log(`    ${C.dim(`${s.name.padEnd(8)} http=${s.http}  tls=${s.tls ?? "-"}`)}`);
     }
 
@@ -167,11 +243,12 @@ async function main() {
  log(` ${C.ok("")} CA ${C.dim((ca.fingerprint || "").slice(0, 29) + "…")} ${C.dim("exp " + (ca.notAfter || "?"))}`);
 
     const certs = {};
-    for (const s of plan.services) {
+    for (const s of services) {
       const c = ensureServiceCert({
         name: s.name,
         dir: CERT_DIR,
-        hosts: [...hosts, `${s.name}.local`],
+        // the same name the edge config uses (scripts/build/lib/hosts.mjs)
+        hosts: [...hosts, ...serviceHostNames(s.name, path.basename(ROOT))],
         ca,
         force: argv.includes("--rotate"),
       });
@@ -192,9 +269,19 @@ async function main() {
     );
 
     step(3, "NGINX CONFIGURATION");
-    const servicesWithTls = plan.services
+    // The TLS port comes from the instance block, the upstream from the
+    // live service. The mapping check below is only meaningful when the
+    // real backends are behind the TLS ports.
+    const servicesWithTls = services
       .filter((s) => s.tls)
-      .map((s) => ({ ...s, httpPort: s.http, tlsPort: s.tls, hosts }));
+      .map((s) => ({
+        ...s,
+        httpPort: s.http,
+        tlsPort: s.tls,
+        livePort: s.livePort,
+        hosts: [...hosts, ...serviceHostNames(s.name, path.basename(ROOT))],
+        serverNames: serviceHostName(s.name, path.basename(ROOT)),
+      }));
     const siteConf = path.join(NGINX_DIR, `${report.project}.conf`);
     generateNginxConf({
       services: servicesWithTls,
@@ -291,7 +378,78 @@ async function main() {
       report.e2e = { ok: e2eOk, ...e2e };
       if (!e2eOk) throw new Error("end-to-end TLS proxy check failed");
 
-      step(8, "SHUTDOWN + PORT RELEASE");
+      step(8, "TOOL -> PORT MAPPING");
+      // A TLS port that answers with the WRONG tool is the worst kind of
+      // clash: it works, and it returns somebody else's data. Every
+      // service must answer on its own name with its own tools.
+      const mapping = [];
+      for (const svc of services) {
+        if (!svc.tls) continue;
+        // A slot with no live service in this instance is not part of it.
+        if (!livePorts[svc.name]) {
+          mapping.push({ service: svc.name, skipped: true, ok: true });
+          log(`    - ${svc.name.padEnd(17)} (no live service in this instance)`);
+          continue;
+        }
+        const name = serviceHostName(svc.name, path.basename(ROOT));
+        // The bridge is an OpenAI compatible server, not an MCP server.
+        const isMcp = svc.name !== "bridge";
+        const probe = await httpsProbe({
+          host: "127.0.0.1",
+          port: svc.tls,
+          servername: name,
+          caPem: fs.readFileSync(ca.certPath),
+          path: isMcp ? "/mcp" : "/health",
+          method: isMcp ? "POST" : "GET",
+          body: isMcp
+            ? JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })
+            : "",
+        });
+        const tools = probe.json?.result?.tools || [];
+        // A tool that belongs to ANOTHER service means the wrong backend is
+        // behind this name. The tool names do not have to start with the
+        // service name ("screen_screenshot" belongs to "screen-recorder").
+        const otherNames = services
+          .map((o) => o.name)
+          .filter((n) => n !== svc.name && n !== "api" && n !== "mcp");
+        // an MCP server must not answer with somebody else's tools
+        // The decisive check: the tools behind this NAME must be the same
+        // tools the service answers on its OWN port. A gateway aggregates
+        // the tools of every server, so "a tool of another service" is
+        // normal there - but a different SET means the wrong backend is
+        // behind the name.
+        let direct = null;
+        if (isMcp) {
+          const d = await httpProbe({
+            host: "127.0.0.1",
+            port: svc.livePort,
+            path: "/mcp",
+            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} }),
+          });
+          direct = (d.json?.result?.tools || []).map((t) => String(t.name || "")).sort();
+        }
+        const viaName = tools.map((t) => String(t.name || "")).sort();
+        const sameSet =
+          !direct || (viaName.length === direct.length && viaName.join("|") === direct.join("|"));
+        const foreign = !sameSet;
+        const ok = probe.status === 200 && !foreign;
+        mapping.push({ service: svc.name, name, status: probe.status, tools: tools.length, ok });
+        log(
+          `    ${ok ? "✓" : "✗"} ${svc.name.padEnd(17)} ${name.padEnd(24)} ` +
+            `tools=${String(tools.length).padStart(3)}`,
+        );
+        if (!ok && probe.error) log(`      ${probe.error}`);
+      }
+      report.mapping = mapping;
+      const badMapping = mapping.filter((m) => !m.ok);
+      if (badMapping.length) {
+        throw new Error(
+          "tool/port mapping is wrong: " +
+            badMapping.map((m) => `${m.service}(${m.status || m.error})`).join(", "),
+        );
+      }
+
+      step(9, "SHUTDOWN + PORT RELEASE");
     }
 
     // stop stub

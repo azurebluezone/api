@@ -44,9 +44,9 @@ export const SERVICE_PLAN = [
   { name: "mcp",     http: 3,  tls: 4,  desc: "MCP gateway" },
   { name: "bridge",  http: 5,  tls: 6,  desc: "local-llm-bridge (llama / ollama)" },
   { name: "ocr",     http: 7,  tls: 8,  desc: "OCR MCP server" },
-  { name: "screen",  http: 9,  tls: 10, desc: "screen-recorder MCP server" },
+  { name: "screen-recorder", http: 9,  tls: 10, desc: "screen-recorder MCP server" },
   { name: "tts",     http: 11, tls: 12, desc: "TTS MCP server" },
-  { name: "adapter", http: 13, tls: 14, desc: "universal-adapter" },
+  { name: "universal-adapter", http: 13, tls: 14, desc: "universal-adapter" },
   { name: "admin",   http: 15, tls: 16, desc: "admin/metrics endpoint" },
   { name: "broker",  http: 17, tls: null, desc: "PHP broker (appsp-internal-connection)" },
 ];

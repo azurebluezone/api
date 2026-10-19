@@ -237,7 +237,7 @@ export function generateNginxConf({ services, certs, outFile, projectName, upstr
         `    add_header Referrer-Policy strict-origin-when-cross-origin always;`,
         ``,
         `    location / {`,
-        `        proxy_pass         http://${upstreamHost}:${svc.httpPort};`,
+        `        proxy_pass         http://${upstreamHost}:${svc.livePort || svc.httpPort};`,
         `        proxy_http_version 1.1;`,
         `        proxy_set_header   Host $host;`,
         `        proxy_set_header   X-Real-IP $remote_addr;`,

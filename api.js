@@ -11615,11 +11615,19 @@ function handleMCP(req, res) {
           ". Send roots in initialize or header X-MCP-Client-Dir to auto-generate client SSOT.";
       }
 
+      // A session id for stateful clients. The server is stateless, but
+      // a client that expects Mcp-Session-Id must receive one.
+      const mcpSessionId = crypto.randomUUID();
+      res.setHeader("Mcp-Session-Id", mcpSessionId);
       jsonResponse(res, 200, {
         jsonrpc: "2.0",
         id,
         result: {
-          protocolVersion: "2024-11-05",
+          protocolVersion:
+            (req.headers &&
+              (req.headers["mcp-protocol-version"] ||
+                req.headers["mcp-protocol"])) ||
+            "2024-11-05",
           capabilities: { tools: {} },
           serverInfo: {
             name: "mission-barisal",
@@ -12460,6 +12468,34 @@ function getCorsOrigin(reqOrigin) {
   return allowedOrigins[0] || "http://localhost:" + PORT;
 }
 
+// ─── Standard response headers ────────────────────────────────────────
+// One place, so every route answers the same way. A cloud client must be
+// able to quote the request id, and must see the MCP protocol version it
+// asked for - some clients refuse a response without it.
+const MCP_PROTOCOL_VERSION_DEFAULT = "2025-06-18";
+
+function setStandardHeaders(req, res) {
+  const h = (req && req.headers) || {};
+  const requestId =
+    h["x-request-id"] || h["x-correlation-id"] || crypto.randomUUID();
+  res.setHeader("X-Request-Id", requestId);
+  res.setHeader("X-Server", "ZombieCoder/MissionBarisal");
+
+  const protocol =
+    h["mcp-protocol-version"] ||
+    h["mcp-protocol"] ||
+    MCP_PROTOCOL_VERSION_DEFAULT;
+  res.setHeader("MCP-Protocol-Version", protocol);
+
+  // the session the client opened (stateless servers may not send one)
+  const sessionId = h["mcp-session-id"] || h["x-session-id"];
+  if (sessionId) res.setHeader("Mcp-Session-Id", sessionId);
+
+  // the client identity, for the logs
+  const clientName = h["x-mcp-client-name"] || h["x-client-name"];
+  if (clientName) res.setHeader("X-Client-Name", clientName);
+}
+
 function jsonResponse(res, status, data) {
   const body = JSON.stringify(data);
   res.writeHead(status, {
@@ -13023,6 +13059,16 @@ const server = http.createServer(async (req, res) => {
   const startTime = Date.now();
   const method = req.method;
   let url = req.url.split("?")[0];
+
+  // ── Standard response headers ──────────────────────────────────────
+  // Cloud clients (IDE extensions, hosted agents) expect the same header
+  // contract everywhere: a request id they can quote in a log, the MCP
+  // protocol version they asked for, and their own session id back.
+  //   X-Request-Id            echo, or a new one
+  //   MCP-Protocol-Version    echo, default 2025-06-18
+  //   Mcp-Session-Id          echo the session the client opened
+  //   X-Server                 the product name
+  setStandardHeaders(req, res);
   // BODY SIZE GUARD — reject oversized requests before any body read (413)
   const declaredLen = parseInt(req.headers["content-length"] || "0", 10);
   if (Number.isFinite(declaredLen) && declaredLen > MAX_BODY_SIZE) {

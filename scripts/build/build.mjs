@@ -300,9 +300,9 @@ function generate(ports, services, manifest) {
     `MCP_PORT=${p.mcp.http}`,
     `BRIDGE_PORT=${p.bridge.http}`,
     `OCR_MCP_PORT=${p.ocr.http}`,
-    `SCREEN_MCP_PORT=${p.screen.http}`,
+    `SCREEN_MCP_PORT=${p["screen-recorder"].http}`,
     `TTS_MCP_PORT=${p.tts.http}`,
-    `UNIVERSAL_ADAPTER_MCP_PORT=${p.adapter.http}`,
+    `UNIVERSAL_ADAPTER_MCP_PORT=${p["universal-adapter"].http}`,
     `ADMIN_PORT=${p.admin.http}`,
     "",
   ].join("\n");

@@ -26,6 +26,53 @@ Architected by **Monu — The Builder** (Mission Barisal persona).
 
 ---
 
+## Quick start (new machine)
+
+```bash
+git clone https://github.com/azurebluezone/api.git
+cd api
+node scripts/build/install.mjs      # checks the runtime, writes .env, picks a free port
+node start.js                       # starts the gateway
+curl http://127.0.0.1:5050/identity
+```
+
+No dependencies to install. Node 18+ (the project uses the built-in
+`node:sqlite`). The installer is idempotent and safe to re-run.
+
+**What the installer does for you**
+
+- checks the Node version and reports the optional system tools
+  (`tesseract`, `ffmpeg`, `nginx`, `openssl`)
+- creates `.env` from `.env.example` and fills the values it can
+- picks a free port for the gateway (5050 when it is free) and moves any
+  busy service port of the MCP registry, the bridge and the adapter
+- gives the instance its own MCP unix socket path
+
+**What it cannot do for you**: fill in the API keys. The ones that matter
+are `ADMIN_TOKEN` and `ADMIN_API_KEY`; every provider key is optional and
+a provider without a key is simply switched off.
+
+**Many instances on one computer**: every instance gets its own ports,
+its own socket and its own certificate. Nothing has to be edited in the
+code. See [CONVENTIONS.md](CONVENTIONS.md).
+
+**TLS edge (optional, needs root)**
+
+```bash
+node scripts/build/install-nginx-site.mjs   # renders the nginx config
+sudo bash scripts/build/install-nginx.sh    # installs it and reloads nginx
+```
+
+**Documents**
+
+| Document | What it answers |
+| --- | --- |
+| [CONVENTIONS.md](CONVENTIONS.md) | how the code is written, and where each concern lives |
+| [docs/HEADERS.md](docs/HEADERS.md) | the header and session contract for clients |
+| [README.md](README.md) | the full system description |
+
+---
+
 ## System Architecture
 
 ```
