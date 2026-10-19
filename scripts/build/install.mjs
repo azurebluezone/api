@@ -57,9 +57,16 @@ function has(cmd) {
   } catch { return false; }
 }
 
+/** Ports this run has already handed out (not listening yet, but taken). */
+const taken = new Set();
+
 async function firstFreePort(preferred) {
   for (let p = preferred; p < preferred + 200; p++) {
-    if (await isPortFree(p)) return p;
+    if (taken.has(p)) continue;
+    if (await isPortFree(p)) {
+      taken.add(p);
+      return p;
+    }
   }
   return null;
 }
