@@ -36,6 +36,8 @@
 //   BRANDING_LOCATION     — Location
 // =============================================================================
 
+const { PORTS } = require("./config/ports.js");
+
 // ─── Default Fallback (all env-var driven) ────────────────────
 function buildDefaultConfig() {
   const port = PORTS.api;   // config/ports.js

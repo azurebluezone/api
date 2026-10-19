@@ -21,6 +21,7 @@ const { URL } = require("url");
 const { handleRpc } = require("./registry");
 const zclog = require("../lib/zc-log");
 const tls = require("./tls");
+const { PORTS } = require("../config/ports.js");
 
 const log = (...a) => console.log("[ua:http]", ...a);
 

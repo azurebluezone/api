@@ -14,6 +14,7 @@ const path = require("path");
 const readline = require("readline");
 const http = require("http");
 const { execSync, spawn } = require("child_process");
+const { PORTS } = require("./config/ports.js");
 
 const VERSION = "3.2.1"; // keep in sync with api.js /health version
 const CONFIG_DIR = path.join(os.homedir(), ".zombiecoder");
