@@ -27,6 +27,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
+import crypto from "node:crypto";
 import { isPortFree } from "./lib/ports.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -140,6 +141,17 @@ async function main() {
     if (moved.length) {
       fs.writeFileSync(ENV_FILE, text);
       report.steps.push({ step: "service-ports", ok: true, moved });
+    }
+
+    // The unix domain socket path is shared by default
+    // (tmp/zombiecoder/mcp.sock). Two instances would fight over it, so
+    // each instance gets its own path unless one was set by hand.
+    if (!/^UDS_PATH=/m.test(text)) {
+      const tag = crypto.createHash("sha256").update(ROOT).digest("hex").slice(0, 8);
+      const uds = path.join(os.tmpdir(), "zombiecoder", tag, "mcp.sock");
+      fs.mkdirSync(path.dirname(uds), { recursive: true });
+      fs.appendFileSync(ENV_FILE, `\n# Per-instance MCP socket (a second instance must not share it)\nUDS_PATH=${uds}\n`);
+      report.steps.push({ step: "uds-path", ok: true, path: uds });
     }
   }
 
