@@ -101,6 +101,41 @@ async function main() {
     report.steps.push({ step: "port-written", ok: true, port });
   }
 
+  // 3b. the MCP registry ports and the other service ports
+  //     A second instance on this computer must not reuse the ports of
+  //     the first one. A busy port is moved to the next free number and
+  //     written back, so the instance owns its whole set.
+  if (envExists && !CHECK_ONLY) {
+    let text = fs.readFileSync(ENV_FILE, "utf8");
+    const moved = [];
+    const mcpPorts = [...text.matchAll(/^(MCP_(\d+)_PORT)=(\d+)$/gm)];
+    for (const m of mcpPorts) {
+      const key = m[1];
+      const port = parseInt(m[3], 10);
+      if (await isPortFree(port)) continue;
+      const next = await firstFreePort(port + 1);
+      if (next) {
+        text = text.replace(new RegExp(`^${key}=${port}$`, "m"), `${key}=${next}`);
+        moved.push({ key, from: port, to: next });
+      }
+    }
+    for (const key of ["BRIDGE_PORT", "UDS_PORT", "ADAPTER_HTTP_PORT"]) {
+      const m = text.match(new RegExp(`^${key}=(\d+)$`, "m"));
+      if (!m) continue;
+      const port = parseInt(m[1], 10);
+      if (await isPortFree(port)) continue;
+      const next = await firstFreePort(port + 1);
+      if (next) {
+        text = text.replace(new RegExp(`^${key}=${port}$`, "m"), `${key}=${next}`);
+        moved.push({ key, from: port, to: next });
+      }
+    }
+    if (moved.length) {
+      fs.writeFileSync(ENV_FILE, text);
+      report.steps.push({ step: "service-ports", ok: true, moved });
+    }
+  }
+
   // 4. optional system tools
   const optional = [
     { tool: "tesseract", why: "OCR MCP server (image text)" },
