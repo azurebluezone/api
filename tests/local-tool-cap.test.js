@@ -172,25 +172,30 @@ function runBlock(resolveProvider, agentModel, toolsArg) {
   for (const k of mcpKeys) MCP_TOOLS[k] = { description: k, params: {}, required: [] };
   const tools = toolsArg;
   const factory = new Function(
-    "resolveProvider", "agent", "log", "tools", "MCP_TOOLS",
+    "resolveProvider", "agent", "log", "tools", "MCP_TOOLS", "resolveLadder",
     block + "\nreturn { isLocalAgent, MAX_TOOLS_LIMIT, toolsForStream, agentProviderId };"
   );
-  return { ...factory(resolveProvider, agent, log, tools, MCP_TOOLS), logs };
+  return { ...factory(resolveProvider, agent, log, tools, MCP_TOOLS, resolveLadder), logs };
 }
 
 const PROVIDERS = {
-  opencode: { name: "OpenCode", priority: 1, models: ["gpt-4o-mini", "deepseek-r1-distill"], config: {} },
-  ollama: { name: "Ollama", priority: 5, local: true, models: ["MODELS_DB"] },
-  custom_2: { name: "Custom-2", priority: 10, custom: true, models: ["phi3:mini"] },
+  opencode: { id: "opencode", name: "OpenCode", priority: 1, models: ["gpt-4o-mini", "deepseek-r1-distill"], config: {} },
+  ollama: { id: "ollama", name: "Ollama", priority: 5, local: true, models: ["MODELS_DB"], config: {} },
+  custom_2: { id: "custom_2", name: "Custom-2", priority: 10, custom: true, models: ["phi3:mini"], config: {} },
 };
 //  resolveProvider  — PROVIDER_CONFIG   PROVIDERS
 // applyModelAlias = api.js-   (MODEL_ALIASES) —
+// The resolution ladder, the real implementation.
+const { resolveLadder: realResolveLadder } = require("../config/providers.js");
+const resolveLadder = (providers, opts) => realResolveLadder(providers, opts || {});
+
 const realResolveProvider = new Function(
   "PROVIDER_CONFIG",
   "DISABLED_MODELS",
   "applyModelAlias",
+  "providerLadder",
   rpSrc + "\nreturn resolveProvider;",
-)(PROVIDERS, new Set(), makeAliasResolver(process.env.MODEL_ALIASES || ""));
+)(PROVIDERS, new Set(), makeAliasResolver(process.env.MODEL_ALIASES || ""), (m, o) => resolveLadder(Object.values(PROVIDERS), Object.assign({ model: m }, o || {})));
 const rp = (m, e) => realResolveProvider(m, e);
 
 // B1. custom_ provider =   5
@@ -211,9 +216,9 @@ assert("B3 ক্লাউড মডেল isLocalAgent=false, ক্যাপ=1
 // B4. GAP-1:       —  regex-
 const r4 = runBlock(rp, "gemma4:31b"); // ollama-তে pull করা কিন্তু models list-এ নেই
 assert(
- "B4 GAP: অন-রেজিস্টার্ড লোকাল মডেল null isLocalAgent=FALSE ক্লাউডের মতো 15 টুল",
-  r4.isLocalAgent === false && r4.MAX_TOOLS_LIMIT === 15 && r4.agentProviderId === "",
- "resolveProvider(exactOnly) null /^custom_/.test('') = false"
+ "B4 অন-রেজিস্টার্ড মডেল ল্যাডারে গিয়ে লোকাল প্রোভাইডারে পৌঁছায় → ক্যাপ=5",
+  r4.agentProviderId === "ollama" && r4.isLocalAgent === true && r4.MAX_TOOLS_LIMIT === 5,
+  "providerId=" + r4.agentProviderId + ", cap=" + r4.MAX_TOOLS_LIMIT
 );
 
 // B5. FIX:  model-name list  —  deepseek-r1-distill
@@ -434,11 +439,16 @@ assert("D14 প্রক্সি রেসপন্সে tool_calls forward + 
 
 // D15 —  TOOLS AVAILABLE   (SSOT:   derive,
 //      —         )
+// The tool list in the prompt is derived from the registry AND limited to
+// the tools that are actually sent in this request. Listing all 153
+// registered tools in the prompt cost 3198 tokens and pushed the agent
+// prompt past the 8192 token context of a small model.
 const dynamicHeader =
-  src.includes('Object.keys(MCP_TOOLS).sort().join(", ")') &&
+  (src.includes("Object.keys(MCP_TOOLS)") ||
+    src.includes("compactToolsText(MCP_TOOLS, MAX_TOOLS_LIMIT")) &&
   !src.includes("- TOOLS AVAILABLE: read_file, write_file, list_directory");
 assert(
-  "D15 এজেন্ট-হেডার টুল-লিস্ট = Object.keys(MCP_TOOLS) (কোনো হার্ডকোড লিস্ট নেই)",
+  "D15 এজেন্ট-হেডার টুল-লিস্ট রেজিস্ট্রি থেকে, পাঠানো টুলগুলোর সাথে সীমাবদ্ধ (কোনো হার্ডকোড লিস্ট নেই)",
   dynamicHeader,
   "registry-derived",
 );

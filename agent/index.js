@@ -87,16 +87,35 @@ function resolveAgentModel(agent, dbModel) {
   // 3. Agent-file fallback — present when the DB has no catalog yet.
   if (agent && agent.fallbackModel) return agent.fallbackModel;
 
-  // 4. The local model the DB knows about. Resolved at runtime, so
-  //    swapping the local model never needs a code change.
+  // 4. The ladder of config/providers.js: a free model, then the local
+  //    model, then the local agent. The SAME order a chat request gets, so
+  //    an agent and a chat can never end up on different models for no
+  //    visible reason.
+  const ladder = agentModelLadder();
+  if (ladder.length) return ladder[0];
+
+  // 5. The local model the DB knows about (a last resort when the
+  //    registry has not been discovered yet).
   const local = localModelFromDb();
   if (local) return local;
 
-  // 5. Global env escape hatch: one knob for every agent.
+  // 6. Global env escape hatch: one knob for every agent.
   if (process.env.AGENT_MODEL) return process.env.AGENT_MODEL;
 
-  // 6. Nothing. The caller reports this honestly — no silent substitution.
+  // 7. Nothing. The caller reports this honestly — no silent substitution.
   return null;
+}
+
+/** The ladder, as the agent sees it. */
+function agentModelLadder() {
+  try {
+    const { buildProviders, resolveLadder } = require("../config/providers.js");
+    const { readEnv } = require("../tools/mcp-registry.js");
+    const providers = buildProviders(readEnv());
+    return resolveLadder(providers, {}).map((c) => c.model);
+  } catch (_) {
+    return [];
+  }
 }
 
 /**

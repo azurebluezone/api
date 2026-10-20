@@ -245,6 +245,17 @@ async function chatImpl(opts) {
     };
   }
 
+  // 🧟 DEBUG (temporary): capture the exact outbound request so a token
+  //    budget can be measured instead of guessed.
+  if (process.env.ZC_CAPTURE_OUTBOUND) {
+    try {
+      require("fs").writeFileSync(
+        process.env.ZC_CAPTURE_OUTBOUND,
+        JSON.stringify({ provider: providerId, params }, null, 2),
+      );
+    } catch (_) { /* ignore */ }
+  }
+
   let res;
   try {
     res = await adapter.chat(cfg, params);
@@ -646,6 +657,124 @@ async function checkProtocol(cfg) {
   return { ...base, ok: true, models: d.models.length, source: d.source, ids: d.models };
 }
 
+
+// ─── The tool loop ────────────────────────────────────────────────────
+// ONE implementation, used by every provider and every caller. A chat
+// that needs tools and a tool call take the same path, so they cannot
+// behave differently from each other.
+//
+// The caller supplies three things:
+//   call(round)              performs one model round (the provider layer)
+//   execute(name, args)      runs one tool
+//   finalAnswer(messages)    the last, tool-free answer
+async function runToolLoop({ call, execute, finalAnswer, maxRounds, log: logFn }) {
+  const MAX = Math.max(1, maxRounds || 5);
+  const note = logFn || (() => {});
+  let response = null;
+
+  for (let round = 0; round < MAX; round++) {
+    response = await call(round);
+    if (!response || !response.success) return response;
+
+    let tcs = response.tool_calls;
+
+    // A model that cannot emit native tool calls sometimes writes the
+    // markers as text. Extraction only, and only for the names that were
+    // advertised in this request.
+    if ((!tcs || !tcs.length) && response.tools && response.tools.length && response.content) {
+      try {
+        const { extractToolCalls } = require("../tools/tool-sanitizer.js");
+        const allow = response.tools
+          .map((t) => (t && t.function && t.function.name) || (t && t.name))
+          .filter(Boolean);
+        const san = extractToolCalls(response.content, allow);
+        if (san.tool_calls.length) {
+          note("SANITIZED_TOOL_CALLS", {
+            model: response.model,
+            dialect: san.dialect,
+            count: san.tool_calls.length,
+          });
+          response.content = san.cleaned;
+          response.tool_calls = san.tool_calls;
+          response.sanitized = true;
+          tcs = san.tool_calls;
+        }
+      } catch (sanErr) {
+        note("SANITIZER_ERROR", { error: sanErr.message });
+      }
+    }
+
+    // The model is NOT a trusted source for tool NAMES. A tool may run
+    // only if its name was advertised in THIS request.
+    const strictAllowlist =
+      String(process.env.TOOL_ALLOWLIST_STRICT || "true").toLowerCase() !== "false";
+    if (strictAllowlist) {
+      const advertised = new Set(
+        (Array.isArray(response.tools) ? response.tools : [])
+          .map((t) => (t && t.function && t.function.name) || (t && t.name))
+          .filter(Boolean),
+      );
+      const rejected = [];
+      tcs = (tcs || []).filter((tc) => {
+        const name = tc && tc.function && tc.function.name;
+        if (name && advertised.has(name)) return true;
+        rejected.push(name || "(unnamed)");
+        return false;
+      });
+      if (rejected.length) {
+        note("TOOL_NOT_ADVERTISED", {
+          model: response.model,
+          rejected,
+          advertised: Array.from(advertised),
+        });
+      }
+    }
+
+    if (!tcs || !tcs.length) {
+      note("TOOL_LOOP_NO_TOOL_CALLS", {
+        round,
+        content_length: (response.content || "").length,
+      });
+      return response;
+    }
+
+    // The assistant message keeps the reasoning: a thinking model rejects
+    // the next request when it is missing.
+    response.messages.push({
+      role: "assistant",
+      content: null,
+      tool_calls: tcs,
+      ...(response.reasoning_content
+        ? { reasoning_content: response.reasoning_content }
+        : {}),
+    });
+
+    for (const tc of tcs) {
+      let result;
+      try {
+        const args =
+          typeof tc.function.arguments === "string"
+            ? JSON.parse(tc.function.arguments)
+            : tc.function.arguments;
+        result = await execute(tc.function.name, args);
+      } catch (err) {
+        result = { content: [{ type: "text", text: "Tool error: " + err.message }] };
+      }
+      const text = result?.content?.[0]?.text || JSON.stringify(result);
+      response.messages.push({
+        role: "tool",
+        tool_call_id: tc.id,
+        content: String(text).slice(0, 100000),
+      });
+    }
+  }
+
+  // Out of rounds: ask for a tool-free final answer instead of failing.
+  note("MAX_TOOL_ROUNDS_EXCEEDED", { max: MAX, model: response?.model });
+  if (finalAnswer) return await finalAnswer(response.messages);
+  return response;
+}
+
 module.exports = {
   chat,
   chatStream,
@@ -665,4 +794,5 @@ module.exports = {
   checkProtocol,
   catalogueUrl,
   classifyError,
+  runToolLoop,
 };

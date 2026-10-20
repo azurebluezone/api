@@ -111,6 +111,9 @@ const {
 } = require("./tools/context-slimmer.js");
 const { makeAliasResolver } = require("./tools/model-alias.js");
 const { PORTS } = require("./config/ports.js");
+const { resolveAgentModel } = require("./agent/index.js");
+const { buildProviders, resolveLadder } = require("./config/providers.js");
+const { readEnv: readProjectEnv } = require("./tools/mcp-registry.js");
 const { loadAgentFiles, getAgentById, listAgentIds } = require("./agent");
 
 // ─── MCP gateway route table (deny-by-default) ─────────────────────────
@@ -182,6 +185,25 @@ function secretFileNotice(filePath) {
       },
     ],
   };
+}
+
+
+// ─── The local agents as providers ────────────────────────────────────
+// An agent that runs on a local model is a provider of kind "agent": it
+// answers with the MCP tool set. Registering them here means the ladder
+// can reach one, and an agent is reached by exactly the same code as a
+// model - there is no separate path that could behave differently.
+let LOCAL_AGENT_MODELS = {};
+
+function registerLocalAgents(agents) {
+  const map = {};
+  for (const a of agents || []) {
+    if (!a || !a.id) continue;
+    const model = resolveAgentModel(a, a.model);
+    if (model) map[a.id] = model;
+  }
+  LOCAL_AGENT_MODELS = map;
+  return Object.keys(map).length;
 }
 
 // ─── Provider layer (official-doc adapters + normalizer) ─────
@@ -907,112 +929,33 @@ function parseModelsEnv(str) {
 // NO HARDCODED MODELS — every provider loads its model list from env:
 //   OPENCODE_MODELS, GROQ_MODELS, GEMINI_MODELS, CUSTOM_PROVIDER_N_MODELS
 // Priorities also come from env: OPENCODE_PRIORITY, GROQ_PRIORITY, ...
-const PROVIDER_CONFIG = {
-  opencode: {
-    name: "OpenCode",
-    needsKey: true,
-    baseUrl: process.env.OPENCODE_BASE || "https://opencode.ai/zen/v1",
-    // A placeholder value ("<YOUR_..._KEY>") is not a credential. Treating it
-    // as one sent a literal placeholder upstream and produced confusing 401s
-    // instead of the provider simply being unavailable. An empty/placeholder
-    // key now disables this provider; every other provider keeps working.
-    key:
-      /^(<.*>|\{\{.*\}\}|YOUR_|CHANGEME|xxx+)$/i.test(
-        (process.env.OPENCODE_API_KEY || "").trim()
-      )
-        ? ""
-        : process.env.OPENCODE_API_KEY || "",
- priority: parseInt(process.env.OPENCODE_PRIORITY || "999", 10), // NaN-proof: unset lowest
-    type: process.env.OPENCODE_TYPE || "openai",
-    models: parseModelsEnv(process.env.OPENCODE_MODELS || ""),
-  },
-  // ── Groq (Secondary Fallback) ────────────────────────────
-  // Acts as a pipeline provider — routes model names to their Groq equivalents.
-  // When OpenCode fails, Groq serves as fallback.
-  groq: {
-    name: "Groq",
-    needsKey: true,
-    baseUrl: process.env.GROQ_BASE || "https://api.groq.com/openai/v1",
-    key: process.env.GROQ_API_KEY || "",
- priority: parseInt(process.env.GROQ_PRIORITY || "999", 10), // NaN-proof: unset lowest
-    type: process.env.GROQ_TYPE || "openai",
-    models: parseModelsEnv(process.env.GROQ_MODELS || ""),
-  },
-  // ── Gemini (Tertiary) ──────────────────────────────────────
-  // Requires API key — OpenCode -> Groq -> Gemini fallback chain
-  gemini: {
-    name: "Gemini",
-    needsKey: true,
-    baseUrl:
-      process.env.GEMINI_BASE ||
-      "https://generativelanguage.googleapis.com/v1beta",
-    key: process.env.GEMINI_API_KEY || "",
- priority: parseInt(process.env.GEMINI_PRIORITY || "999", 10), // NaN-proof: unset lowest
-    type: "gemini", // special: Gemini API (NOT OpenAI-compatible)
-    models: parseModelsEnv(process.env.GEMINI_MODELS || ""),
-  },
-  // ── Cloudflare — REMOVED as a provider (2026-10-11, user request).
-  //    No CF_* env vars, no provider entry, no DB rows, no docs. The generic
-  //    CUSTOM_PROVIDER_N_* env mechanism covers any future OpenAI-compatible GW.
-  // ── Ollama (Local + Cloud LLM) ─────────────────────────
-  // First-class provider (NOT a custom_N provider). Serves local models
-  // pulled via `ollama pull` AND cloud models (when the Ollama server's
-  // cloud remote is reachable: OLLAMA_REMOTES / OLLAMA_NO_CLOUD) — both
-  // surface through the same /v1/models endpoint, so dynamic discovery
-  // yields "cloud if API else local" behaviour automatically.
-  ollama: {
-    name: "Ollama",
-    baseUrl: process.env.OLLAMA_BASE || "http://127.0.0.1:5051",
-    // Key resolution: explicit OLLAMA_API_KEY first; ollama.com CLOUD auth
-    // lives in OLLAMA_CLOUD_API_KEY (.env ships the cloud key there).
-    // Local keyless servers ignore the Bearer header, so one fallback is safe.
-    key: process.env.OLLAMA_API_KEY || process.env.OLLAMA_CLOUD_API_KEY || "",
- priority: parseInt(process.env.OLLAMA_PRIORITY || "999", 10), // NaN-proof: unset lowest
-    type: process.env.OLLAMA_TYPE || "openai",
-    // DIALECT_FIX (2026-10-12): `type` alone CANNOT pick the wire dialect.
-    // adapterFor() (provider/index.js) matches by provider ID before `type`,
-    // so id "ollama" always reached provider/ollama.js — and that adapter
-    // defaults to the NATIVE /api/chat. Any OpenAI-compatible endpoint
-    // (local-llm-bridge, LM Studio, vLLM, Ollama's own /v1) therefore got a
-    // 404 "no route for POST /api/chat" in ~1ms and silently fell through to
-    // the cloud fallback. Evidence: OLLAMA_BASE=http://127.0.0.1:11435/v1
-    // (the bridge) + log 07:28:55 `no route for POST /api/chat`.
-    // Set OLLAMA_DIALECT=openai to route through {base}/v1/chat/completions.
-    // Unset  "" (falsy)  adapterFor() falls through exactly as before.
-    dialect: process.env.OLLAMA_DIALECT || "",
-    // UDS fast path: when OLLAMA_SOCKET is set (socat -> ollama:11434),
-    //    transport.js sends requests over the unix socket FIRST and falls
-    //    back to plain HTTP (this baseUrl) on connection errors only —
-    //    never on timeout (a slow local model must not be tried twice).
-    socketPath: process.env.OLLAMA_SOCKET || undefined,
-    // Model list is NOT hardcoded here (no OLLAMA_MODELS): the local
-    // provider's live list is DISCOVERED from the bridge (see
-    // loadOllamaModelsFromBridge) and written to the models DB.
-    // parseModelsEnv stays only for the (unused) legacy env override.
-    models: parseModelsEnv(process.env.OLLAMA_MODELS || ""),
-// OLLAMA_TIMEOUT_MS was in .env (1200000 = 20 min) but read NOWHERE, so the transport fell back to its 60s default and killed every slow local-model…
-    timeout: parseInt(process.env.OLLAMA_TIMEOUT_MS || "60000", 10),
-    streamTimeout: parseInt(process.env.OLLAMA_TIMEOUT_MS || "300000", 10),
-    local: true,
-  },
-  // ── Ollama Cloud (ollama.com) — the SAME Ollama, hosted ──
-  //   Enabled ONLY when a key is configured. The model list is DISCOVERED
-  //   from the cloud (/api/tags), never hardcoded — the catalogue changes
-  //   without a code change.
-  "ollama-cloud": {
-    name: "Ollama Cloud",
-    needsKey: true,
-    baseUrl: process.env.OLLAMA_CLOUD_BASE || "https://ollama.com",
-    key: process.env.OLLAMA_CLOUD_API_KEY || "",
-    priority: parseInt(process.env.OLLAMA_CLOUD_PRIORITY || "998", 10),
-    type: "ollama",
-    models: parseModelsEnv(process.env.OLLAMA_CLOUD_MODELS || ""),
-    // No key  the provider exists but serves nothing.
-    enabled: !!String(process.env.OLLAMA_CLOUD_API_KEY || "").trim(),
-    local: false,
-    timeout: parseInt(process.env.OLLAMA_CLOUD_TIMEOUT_MS || "120000", 10),
-  },
-};
+// ─── The provider registry ────────────────────────────────────────────
+// ONE definition, built from the environment by config/providers.js. The
+// Ollama bridge, the hosted Ollama, Groq, Gemini, OpenCode, a custom
+// gateway and a local agent are all entries in the same list with the same
+// fields - so there is no separate code path for "the local model" or "a
+// free model" that could behave differently from the others.
+const PROVIDER_REGISTRY = buildProviders(readProjectEnv());
+const PROVIDER_CONFIG = {};
+for (const p of PROVIDER_REGISTRY) {
+  PROVIDER_CONFIG[p.id] = {
+    ...p,
+    // fields the runtime adds
+    socketPath: undefined,
+    streamTimeout: undefined,
+    timeout: undefined,
+  };
+}
+// The local provider keeps its socket and timeout settings.
+if (PROVIDER_CONFIG.ollama) {
+  PROVIDER_CONFIG.ollama.socketPath = process.env.OLLAMA_SOCKET || undefined;
+  PROVIDER_CONFIG.ollama.timeout = parseInt(process.env.OLLAMA_TIMEOUT_MS || "60000", 10);
+  PROVIDER_CONFIG.ollama.streamTimeout = parseInt(process.env.OLLAMA_TIMEOUT_MS || "300000", 10);
+}
+if (PROVIDER_CONFIG["ollama-cloud"]) {
+  PROVIDER_CONFIG["ollama-cloud"].timeout = parseInt(process.env.OLLAMA_CLOUD_TIMEOUT_MS || "120000", 10);
+  PROVIDER_CONFIG["ollama-cloud"].streamTimeout = parseInt(process.env.OLLAMA_CLOUD_TIMEOUT_MS || "300000", 10);
+}
 
 // ─── Dynamic Custom Provider Loader ─────────────────────────
 // Scans CUSTOM_PROVIDER_N_* env vars and dynamically adds them to
@@ -1645,12 +1588,20 @@ function normalizeRoutingModel(model) {
 }
 
 function getFallbackModel(excludeModel, triedModels) {
-  const excludeSet = new Set(triedModels || []);
-  if (excludeModel) excludeSet.add(excludeModel);
+  // The ladder again - a free model first, then the local model, then the
+  // local agent. The same order everywhere, so a fallback never behaves
+  // differently from the original request.
+  const ladder = providerLadder(excludeModel, { tried: triedModels || [] });
+  const skip = new Set(triedModels || []);
+  if (excludeModel) skip.add(excludeModel);
+  for (const cand of ladder) {
+    if (skip.has(cand.model)) continue;
+    return cand.model;
+  }
   const candidates = Object.values(PROVIDER_CONFIG)
     .sort((a, b) => (a.priority || 999) - (b.priority || 999))
     .flatMap((provider) => provider.models.map(getModelName));
-  return candidates.find((candidate) => !excludeSet.has(candidate)) || null;
+  return candidates.find((candidate) => !skip.has(candidate)) || null;
 }
 
 // ─── Competition Router ─────────────────────────────────────
@@ -1724,6 +1675,21 @@ const applyModelAlias = makeAliasResolver(process.env.MODEL_ALIASES || "");
 // agent->model row fails loudly instead of being answered by another model.
 const ALLOW_WILDCARD_MODEL = process.env.ALLOW_WILDCARD_MODEL || "0";
 
+// ─── The resolution ladder ───────────────────────────────────────────
+// One order for every caller: the model that was asked for, then a free
+// model, then the local model, then the local agent. The old code had
+// four different resolutions (resolveProvider, findNextProvider,
+// getFallbackModel, the agent loader) and they could disagree - a model
+// that one of them could not find, another one would serve.
+function providerLadder(model, options = {}) {
+  return resolveLadder(Object.values(PROVIDER_CONFIG), {
+    model,
+    agentId: options.agentId,
+    tried: options.tried || [],
+    agentModels: LOCAL_AGENT_MODELS,
+  });
+}
+
 function resolveProvider(model, exactOnly) {
   // GUARD: Reject template/placeholder model names (e.g. "{{model}}")
   // These come from misconfigured clients and cause massive PROXY_FAIL storms
@@ -1764,6 +1730,20 @@ function resolveProvider(model, exactOnly) {
     return { ...allNames.get(model), matchType: "exact" };
   }
   if (exactOnly) return null;
+
+  // 1b. The ladder: a free model, the local model, the local agent.
+  const ladder = providerLadder(model);
+  for (const cand of ladder) {
+    if (cand.reason === "requested") continue;
+    const cfg = PROVIDER_CONFIG[cand.providerId];
+    if (!cfg) continue;
+    return {
+      providerId: cand.providerId,
+      config: cfg,
+      matchType: cand.reason,
+      model: cand.model,
+    };
+  }
 
   // 2. Agent ids resolve to their DB-backed model before anything else.
   //    Without this an agent whose model row is stale (e.g. "llama-local",
@@ -1835,6 +1815,15 @@ function resolveAllProviders(model) {
 // If current provider fails, try the next provider
 // Skips providers that are unhealthy (consecutive failures) or rate-limited
 function findNextProvider(model, currentProviderId) {
+  // The ladder decides who is next: the same order for every caller.
+  const ladder = providerLadder(model);
+  const nextEntry = ladder.find((c) => c.providerId !== currentProviderId);
+  if (nextEntry && PROVIDER_CONFIG[nextEntry.providerId]) {
+    const cfg = PROVIDER_CONFIG[nextEntry.providerId];
+    if (cfg.enabled !== false && isProviderHealthy(nextEntry.providerId, nextEntry.model)) {
+      return { providerId: nextEntry.providerId, config: cfg, model: nextEntry.model };
+    }
+  }
   const allProviders = resolveAllProviders(model);
   const currentIdx = allProviders.findIndex(
     (p) => p.providerId === currentProviderId,
@@ -4317,6 +4306,13 @@ function sanitizeTools(tools, model) {
 async function refreshAgents() {
   AGENTS = await loadPersonas();
   STATS.totalAgents = AGENTS.length;
+  // The local agents join the registry, so the ladder can reach one.
+  try {
+    const n = registerLocalAgents(AGENTS);
+    if (n) log("INFO", "LOCAL_AGENTS_REGISTERED", { count: n });
+  } catch (e) {
+    log("WARN", "LOCAL_AGENTS_REGISTER_FAIL", { error: e.message });
+  }
   return AGENTS;
 }
 
@@ -6656,159 +6652,94 @@ async function callModelWithTools(
   tools,
   tool_choice,
   providerOverride,
+  triedModels,
 ) {
-// MAX_TOOL_ROUNDS was in .env (15) but the code hardcoded 5 — the env var was never read. With 5 rounds a real task (read analyse write verify) ran o…
+  // The tool loop lives in the provider layer (provider/index.js
+  // runToolLoop): one implementation for every provider and every caller.
+  // This function only supplies the three things the loop needs.
   const MAX_ROUNDS = Math.max(
     1,
     parseInt(process.env.MAX_TOOL_ROUNDS || "5", 10) || 5,
   );
-  for (let round = 0; round < MAX_ROUNDS; round++) {
-    // ZOMBIE FIX: Don't force tool_choice to "required" — OpenCode free models
-    // (nemotron-3-ultra-free, mimo-v2.5-free, big-pickle) return 400 error
-    // when tool_choice is "required". Let model decide ("auto" behavior).
-    // User can still explicitly pass tool_choice if needed.
-    const tc = tool_choice || undefined;
+
+  const call = async (round) => {
     const response = await callModel(
       model,
       messages,
       temperature,
       tools,
-      tc,
+      tool_choice || undefined,
       null,
       providerOverride,
     );
-    if (!response.success) return response;
-    let tcs = response.tool_calls;
-    if ((!tcs || tcs.length === 0) && tools && tools.length && response.content) {
-      // TOOL SANITIZER (last resort): custom providers / small local models
-      // sometimes answer in plain text marker format instead of native
-      // tool_calls. Extract real calls from the markers — extraction only,
-      // never invention (allowlist = names actually sent in this request).
-      try {
-        const { extractToolCalls } = require("./tools/tool-sanitizer.js");
-        const allow = tools
-          .map((t) => (t && t.function && t.function.name) || (t && t.name))
-          .filter(Boolean);
-        const san = extractToolCalls(response.content, allow);
-        if (san.tool_calls.length) {
-          log("WARN", "SANITIZED_TOOL_CALLS", {
-            model,
-            dialect: san.dialect,
-            count: san.tool_calls.length,
-          });
-          response.content = san.cleaned;
-          response.tool_calls = san.tool_calls;
-          response.sanitized = true;
-          tcs = san.tool_calls;
-        }
-      } catch (sanErr) {
-        log("WARN", "SANITIZER_ERROR", { error: sanErr.message });
-      }
+    if (response && response.success) {
+      response.messages = messages;
+      response.tools = tools;
+      response.model = model;
     }
-    // ───  TOOL ALLOWLIST CHOKE POINT (2026-10-19) ────────────────
-    // The model is NOT a trusted source for tool NAMES. Until now only
-    // the TEXT-marker fallback branch applied an allowlist; native
-    // tool_calls (including the ones local-llm-bridge.js manufactures
-    // from raw model text) were executed by name with no check at all.
-    // Consequence proven by live probe: a model advertised only
-    // ["read_file"] could still call exec / env_get / delete_file.
-    //
-    // Rule: a tool may run only if its name was advertised in THIS
-    // request. `tools` empty/undefined  no tool may run.
-    // Escape hatch for emergencies: TOOL_ALLOWLIST_STRICT=false.
-// ── SECTION: tool-allowlist-choke-point ──
-    const strictAllowlist =
-      String(process.env.TOOL_ALLOWLIST_STRICT || "true").toLowerCase() !== "false";
-    if (strictAllowlist) {
-      const advertised = new Set(
-        (Array.isArray(tools) ? tools : [])
-          .map((t) => (t && t.function && t.function.name) || (t && t.name))
-          .filter(Boolean),
-      );
-      const rejected = [];
-      tcs = (tcs || []).filter((tc) => {
-        const name = tc && tc.function && tc.function.name;
-        if (name && advertised.has(name)) return true;
-        rejected.push(name || "(unnamed)");
-        return false;
-      });
-      if (rejected.length) {
-        log("WARN", "TOOL_NOT_ADVERTISED", {
-          model,
-          rejected,
-          advertised: Array.from(advertised),
-          note: "model asked for tools that were not in the request — dropped",
-        });
-      }
-    }
-
-    if (!tcs || tcs.length === 0) {
-// ── END SECTION: tool-allowlist-choke-point ──
-      log("INFO", "TOOL_LOOP_NO_TOOL_CALLS", {
-        round,
-        content_length: (response.content || "").length,
-      });
- return response; // No more tools done
-    }
-
-    // Append assistant tool_calls message
-    // CRITICAL: preserve reasoning_content — DeepSeek thinking mode requires
-    // it to be passed back in the next request or it rejects with
-    // "The reasoning_content in the thinking mode must be passed back"
-    messages.push({
-      role: "assistant",
-      content: null,
-      tool_calls: tcs,
-      ...(response.reasoning_content
-        ? { reasoning_content: response.reasoning_content }
-        : {}),
-    });
-    // Execute each tool
-    for (const tc of tcs) {
-      let result;
-      try {
-        const args =
-          typeof tc.function.arguments === "string"
-            ? JSON.parse(tc.function.arguments)
-            : tc.function.arguments;
-        result = await executeMcpTool(tc.function.name, args);
-      } catch (err) {
-        result = {
-          content: [{ type: "text", text: "Tool error: " + err.message }],
-        };
-      }
-      const text = result.content?.[0]?.text || JSON.stringify(result);
-      messages.push({
-        role: "tool",
-        tool_call_id: tc.id,
-        content: text.slice(0, 100000),
-      });
-    }
-  }
-  // After max rounds, force a text-only response (no tools) instead of error
-  log("WARN", "MAX_TOOL_ROUNDS_EXCEEDED", { max: MAX_ROUNDS, model });
-  messages.push({
-    role: "user",
-    content:
-      "IMPORTANT: You have used all available tool calls. Now provide your FINAL ANSWER based on the information you already have. Do NOT call any more tools. Just write your response directly.",
-  });
-  const forceResponse = await callModel(
-    model,
-    messages,
-    temperature,
-    undefined,
-    undefined,
-    null,
-    providerOverride,
-  );
-  if (forceResponse.success && forceResponse.content) {
-    return { success: true, content: forceResponse.content, tool_calls: null };
-  }
-  return {
-    success: false,
-    error: "Max tool call rounds (" + MAX_ROUNDS + ") exceeded",
-    content: "",
+    return response;
   };
+
+  const execute = async (name, args) => executeMcpTool(name, args);
+
+  const finalAnswer = async (msgs) => {
+    msgs.push({
+      role: "user",
+      content:
+        "IMPORTANT: You have used all available tool calls. Now provide your FINAL ANSWER based on the information you already have. Do NOT call any more tools. Just write your response directly.",
+    });
+    const forceResponse = await callModel(
+      model,
+      msgs,
+      temperature,
+      undefined,
+      undefined,
+      null,
+      providerOverride,
+    );
+    if (forceResponse && forceResponse.success && forceResponse.content) {
+      return { success: true, content: forceResponse.content, tool_calls: null };
+    }
+    return {
+      success: false,
+      error: "Max tool call rounds (" + MAX_ROUNDS + ") exceeded",
+      content: "",
+    };
+  };
+
+  const result = await providerRegistry.runToolLoop({
+    call,
+    execute,
+    finalAnswer,
+    maxRounds: MAX_ROUNDS,
+    log: (event, data) => log("INFO", event, data),
+  });
+
+  // A provider that fails in a retriable way (5xx, timeout, a gateway
+  // that cannot parse the model's output) must not end the agent. When no
+  // other provider serves THIS model, hop to another model: the work
+  // continues, only the model changes.
+  if (result && !result.success) {
+    const retriable =
+      result.retriable ||
+      /exceeds the available context|peg-native format|Internal Server Error|request timeout|upstream/i.test(
+        String(result.error || ""),
+      );
+    const hop = retriable ? getFallbackModel(model, triedModels) : null;
+    if (hop && hop !== model) {
+      log("WARN", "AGENT_MODEL_HOP", {
+        from: model,
+        to: hop,
+        reason: String(result.error || "").slice(0, 120),
+      });
+      const hopped = await callModelWithTools(
+        hop, messages, temperature, tools, tool_choice,
+        providerOverride, (triedModels || []).concat([model]),
+      );
+      if (hopped && hopped.success) return hopped;
+    }
+  }
+  return result;
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -9320,6 +9251,34 @@ function getSSOTContext(clientCtx) {
   return "";
 }
 
+// ─── Agent context budget ─────────────────────────────────────────────
+// A small local or remote model has a small context window (the GPU box
+// serves a 3B model with 8192 tokens). The tool schemas alone are ~3200
+// tokens and the persona another ~300, so the project context inlined
+// into the request has to fit in what is left - otherwise the request is
+// rejected with "request (10047 tokens) exceeds the available context
+// size" and the agent never runs at all.
+//
+// The budget is an operator setting, in TOKENS. The full files stay on
+// disk: the agent has read_ssot and read_file for that.
+function agentContextBudgetChars() {
+  const tokens = parseInt(process.env.AGENT_CONTEXT_TOKEN_BUDGET || "3000", 10);
+  if (!Number.isFinite(tokens) || tokens <= 0) return 0; // 0 = no limit
+  return tokens * 3; // ~3 characters per token for mixed text
+}
+
+function budgetText(text, maxChars, what) {
+  if (!text) return "";
+  if (!maxChars || text.length <= maxChars) return text;
+  return (
+    text.slice(0, maxChars) +
+    "\n[truncated to fit the context budget - the full " +
+    (what || "file") +
+    " is available with read_file / read_ssot]"
+  );
+}
+
+
 /**
  * 2026-09-27 context alignment: check the SSOT file AFTER the user's input and
  * send only the sections that answer THIS input (plus a short overview when
@@ -9330,10 +9289,11 @@ function buildSSOTExcerpt(sessionId, userInput) {
   try {
     const dir = getEffectiveDir(sessionId) || mcpWorkingDir || path.resolve(".");
     const excerpt = slimSSOT(readSSOT(dir), userInput || "");
+    const ssotBudget = Math.round(agentContextBudgetChars() * 0.4);
     if (!excerpt) return "";
     return (
       "\n\nPROJECT SSOT (relevant excerpt — the full blueprint is at .zombiecoder/SSOT.md):\n" +
-      excerpt +
+      budgetText(excerpt, ssotBudget, "SSOT.md") +
       "\n--- END SSOT EXCERPT ---\n"
     );
   } catch (e) {
@@ -9361,15 +9321,16 @@ function buildThreeFileContext(projectDir, sessionId, userInput) {
     const syllabusContent = readSyllabus(dir);
     if (syllabusContent) {
       const slim = slimSyllabus(syllabusContent, userInput || "");
+      const syllabusBudget = Math.round(agentContextBudgetChars() * 0.4);
       return (
         "\n\nAGENT SYLLABUS (learned knowledge — ALWAYS check this first):\n" +
-        slim +
+        budgetText(slim, syllabusBudget, "syllabus.md") +
         "\n--- END SYLLABUS ---\n" +
         "\n\nSESSION TOOLS & SYSTEM IDENTITY & ETHICS (injected every session):\n" +
         // SSOT FIX: never hardcode the tool list — derive from the registry
         // so the header can never drift from MCP_TOOLS (was missing db_list_tables)
         "- TOOLS AVAILABLE: " +
-        Object.keys(MCP_TOOLS).sort().join(", ") +
+        (agentToolNames || Object.keys(MCP_TOOLS).slice(0, MAX_TOOLS_LIMIT)).join(", ") +
         "\n" +
         "- SYSTEM IDENTITY: You are a Mission Barisal agent (ZombieCoder) owned by Sahon Srabon (Barisal, Bangladesh). You are NOT a generic assistant. Follow the context above exactly.\n" +
         "- ETHICS: Evidence-driven, proof-first. Never hallucinate. If you lack proof say 'আমার কাছে প্রমাণ নেই'. Never hide errors. Code in English, chat with users in Bengali (Barishali style). No emojis in code.\n" +
@@ -9400,6 +9361,16 @@ async function executeSingleAgent(
     name: agent.name,
     session: sessionId ? sessionId.slice(0, 8) : "none",
   });
+
+  // The tools this agent will actually receive. The prompt lists exactly
+  // these names - the full schemas travel in the `tools` array, so a
+  // second copy in the prompt is pure waste, and with 153 registered
+  // tools it was 3198 tokens of an 8192 token context.
+  const agentToolNames = (
+    Array.isArray(tools) && tools.length
+      ? tools.map((t) => (t && t.function && t.function.name) || (t && t.name))
+      : Object.keys(MCP_TOOLS).slice(0, MAX_TOOLS_LIMIT)
+  ).filter(Boolean);
 
   const userMsg = messages.filter((m) => m.role === "user").pop();
   let userInput = userMsg ? userMsg.content : "";
@@ -9482,7 +9453,7 @@ async function executeSingleAgent(
           "\n\nPROOF REQUIREMENT: You MUST provide verifiable evidence for EVERY claim. If you cannot provide evidence, say 'আমার কাছে প্রমাণ নেই'. Still help with what you know — say you lack proof but offer suggestions." +
           extraRules +
  "\n\n TOOLS AVAILABLE (call these via tool calls — do NOT just describe them):\n" +
-          compactToolsText(MCP_TOOLS) +
+          compactToolsText(MCP_TOOLS, MAX_TOOLS_LIMIT, agentToolNames) +
           "- Use web_search for real-time information.\n" +
           "- Use call_agent to delegate sub-tasks to other specialized agents.\n" +
           "When the user asks you to read files, write files, list directories, or open files in a browser — USE these tools directly by calling them. Do NOT just describe what you would do — actually execute the tool calls. Only respond with text after you have completed all necessary tool operations.",
@@ -9500,7 +9471,7 @@ async function executeSingleAgent(
           ssotFileCtx +
           threeFileCtx +
  "\n\n TOOLS AVAILABLE (call these via tool calls — do NOT just describe them):\n" +
-          compactToolsText(MCP_TOOLS) +
+          compactToolsText(MCP_TOOLS, MAX_TOOLS_LIMIT, agentToolNames) +
           "- Use web_search for real-time information.\n" +
           "- Use call_agent to delegate sub-tasks to other specialized agents (e.g., call bug-hunter for debugging, security-hero for security review).\n" +
           "When the user asks you to read files, write files, list directories, or open files in a browser — USE these tools directly by calling them. Do NOT just describe what you would do — actually execute the tool calls. Only respond with text after you have completed all necessary tool operations.",
@@ -15473,12 +15444,20 @@ window.__ADMIN_CONFIG = ${JSON.stringify({
 
         // LOCAL MODEL TOOL LIMIT: Ollama/llama.cpp can't handle many tools
         // with large system prompts  timeout. Cap aggressively for local models.
-        const agentProviderInfo = resolveProvider(agent.model, true);
+        // The SAME resolution the request will use (the ladder), so the
+        // tool cap belongs to the provider that actually answers. Before,
+        // an unregistered model resolved to null here but to a local model
+        // in the call - the cap and the call disagreed.
+        const agentProviderInfo = resolveProvider(agent.model, false);
         const agentProviderId = agentProviderInfo?.providerId || "";
         // Local/small-model heuristic is CONFIG/provider-driven ONLY — no
         // model-name list (a cloud model named "deepseek-*" used to be
         // mis-capped as local, and any new local model name was missed).
-        const isLocalAgent = !!agentProviderInfo?.config?.local || /^custom_/.test(agentProviderId);
+        const isLocalAgent =
+          !!agentProviderInfo?.config?.local ||
+          agentProviderInfo?.matchType === "local" ||
+          agentProviderInfo?.matchType === "local-agent" ||
+          /^custom_/.test(agentProviderId);
         const MAX_TOOLS_LIMIT = isLocalAgent ? 5 : 15;
         let toolsForStream =
           tools ||
@@ -17219,6 +17198,13 @@ async function init() {
   seedAdminUser();
   AGENTS = await loadPersonas();
   STATS.totalAgents = AGENTS.length;
+  // The local agents join the registry, so the ladder can reach one.
+  try {
+    const n = registerLocalAgents(AGENTS);
+    if (n) log("INFO", "LOCAL_AGENTS_REGISTERED", { count: n });
+  } catch (e) {
+    log("WARN", "LOCAL_AGENTS_REGISTER_FAIL", { error: e.message });
+  }
 
   if (AGENTS.length === 0) {
     log("WARN", "START_NO_AGENTS", { fallback: "using DEFAULT_AGENTS" });

@@ -152,18 +152,27 @@ function slimSSOT(fullText, userInput, opts) {
  * descriptions and JSON schemas already travel in the request's `tools`
  * argument — repeating them as prose burned ~800 tokens per system prompt.
  */
-function compactToolsText(toolMap) {
+/**
+ * The tool list for the prompt.
+ *
+ * The model already receives the full schemas in the `tools` array, so
+ * repeating names AND parameters here is pure waste - with the external
+ * MCP servers registered it was 3198 tokens of a prompt that had to fit
+ * into an 8192 token context. Only the names are listed, and only the
+ * ones that are actually offered in this request.
+ */
+function compactToolsText(toolMap, limit, names) {
   try {
     const entries = Object.entries(toolMap || {});
     if (entries.length === 0) return "- (no tools available)\n";
+    const wanted = names && names.length ? new Set(names) : null;
+    const picked = entries
+      .filter(([name]) => !wanted || wanted.has(name))
+      .slice(0, limit || entries.length)
+      .map(([name]) => name);
     return (
-      entries
-        .map(([name, def]) => {
-          const params = Object.keys(def.params || {}).join(", ");
-          return "- **" + name + "**" + (params ? "(" + params + ")" : "");
-        })
-        .join("\n") +
-      "\n(Full schemas are in the function definitions — call tools directly; do not describe them in prose.)\n"
+      picked.map((name) => "- " + name).join(", ") +
+      "\n(The full schemas are in the function definitions - call the tools directly, do not describe them in prose.)\n"
     );
   } catch (e) {
     return "- (tools unavailable)\n";
