@@ -67,22 +67,20 @@ function nginxBin() {
 
 /** The services of THIS instance and where each one is reachable. */
 function instanceServices(env) {
+  const { getMcpServers } = require(path.join(ROOT, "tools", "mcp-registry.js"));
+  const { edgeServices } = require(
+    path.join(ROOT, "scripts", "build", "lib", "edge-services.mjs"),
+  );
   const plan = require(path.join(ROOT, "scripts", "build", "lib", "ports.mjs"));
-  const out = [];
-  const apiPort = env.PORT || "5050";
-  const primary = apiPort === "5050";
 
-  // the public hostnames this instance answers to
+  // The public hostnames this instance answers to
   const publicDomains = publicDomainsOf(env);
   const primaryDomain = publicDomains[0] || "localhost";
 
-  // the instance block: the primary instance keeps the host ports, a second
+  // The instance block: the primary instance keeps the host ports, a second
   // instance gets its own block so the two never collide
-  const block = primary
-    ? null
-    : plan.getBlockPorts
-      ? plan.getBlockPorts(ROOT)
-      : null;
+  const primary = String(env.PORT || "5050") === "5050";
+  const block = primary ? null : plan.getBlockPorts(ROOT);
 
   const tlsPortFor = (name, index) => {
     if (primary) return 443;
@@ -90,44 +88,24 @@ function instanceServices(env) {
     return null;
   };
 
-  out.push({
-    name: "api",
-    desc: "Gateway (api.js)",
-    httpPort: apiPort,
-    tlsPort: tlsPortFor("api", 0),
-    serverNames: [...publicDomains, serviceHostName("api", path.basename(ROOT))].join(" "),
-    hosts: [...publicDomains, "localhost", "127.0.0.1"],
-  });
-  out.push({
-    name: "mcp",
-    desc: "MCP tool endpoint (/mcp of the gateway)",
-    httpPort: apiPort,
-    tlsPort: tlsPortFor("mcp", 1),
-    serverNames: serviceHostName("mcp", path.basename(ROOT)),
-    hosts: [...publicDomains, "localhost", "127.0.0.1"],
-  });
-  out.push({
-    name: "bridge",
-    desc: "local-llm-bridge (llama / ollama)",
-    httpPort: env.BRIDGE_PORT || "11435",
-    tlsPort: tlsPortFor("bridge", 2),
-    serverNames: serviceHostName("bridge", path.basename(ROOT)),
-    hosts: [...publicDomains, "localhost", "127.0.0.1"],
-  });
-
-  // the external MCP servers, straight from the registry
-  const { getMcpServers } = require(path.join(ROOT, "tools", "mcp-registry.js"));
-  for (const s of getMcpServers()) {
-    out.push({
-      name: s.name,
-      desc: s.desc || s.name,
-      httpPort: String(s.port),
-      tlsPort: tlsPortFor(s.name, out.length),
-      serverNames: serviceHostName(s.name, path.basename(ROOT)),
+  return edgeServices(env, getMcpServers()).map((svc, index) => {
+    const own = serviceHostName(svc.name, path.basename(ROOT));
+    const extra = (svc.alsoNames || []).map((n) => serviceHostName(n, path.basename(ROOT)));
+    // The public domain belongs to the gateway only. Every other service
+    // answers on its own name - otherwise a request could land on the
+    // wrong upstream.
+    const serverNames = svc.public
+      ? [...publicDomains, own, ...extra].join(" ")
+      : [own, ...extra].join(" ");
+    return {
+      name: svc.name,
+      desc: svc.desc,
+      httpPort: svc.port,
+      tlsPort: tlsPortFor(svc.name, index),
+      serverNames,
       hosts: [...publicDomains, "localhost", "127.0.0.1"],
-    });
-  }
-  return out;
+    };
+  });
 }
 
 function main() {

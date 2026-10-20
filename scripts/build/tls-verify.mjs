@@ -215,20 +215,25 @@ async function main() {
     const { getMcpServers, readEnv } = await import(
       path.join(ROOT, "tools", "mcp-registry.js")
     );
+    const { edgeServices } = await import(
+      path.join(ROOT, "scripts", "build", "lib", "edge-services.mjs")
+    );
     const env = readEnv();
-    const livePorts = {
-      api: env.PORT || "5050",
-      mcp: env.PORT || "5050",
-      bridge: env.BRIDGE_PORT || "11435",
-    };
-    for (const m of getMcpServers()) livePorts[m.name] = String(m.port);
+
+    // The SAME service list the edge renders from - one definition, so the
+    // verifier can never check a service the edge does not serve.
+    const livePorts = {};
+    for (const svc of edgeServices(env, getMcpServers())) {
+      livePorts[svc.name] = svc.port;
+    }
     const services = plan.services
       .filter((s) => s.tls)
       .map((s) => ({
         ...s,
         livePort: livePorts[s.name] || String(s.http),
         tlsPort: s.tls,
-      }));
+      }))
+      .filter((s) => !!livePorts[s.name]);
     report.plan = { base: plan.base, services: services.length };
     for (const s of services) {
       log(`    ${C.dim(`${s.name.padEnd(8)} http=${s.http}  tls=${s.tls ?? "-"}`)}`);
@@ -282,7 +287,12 @@ async function main() {
         hosts: [...hosts, ...serviceHostNames(s.name, path.basename(ROOT))],
         serverNames: serviceHostName(s.name, path.basename(ROOT)),
       }));
-    const siteConf = path.join(NGINX_DIR, `${report.project}.conf`);
+    // Its own file, in its own folder: the edge config that gets INSTALLED
+    // is written by install-nginx-site.mjs. Two scripts writing the same
+    // path meant the verifier's throwaway config overwrote the real one.
+    const verifyDir = path.join(NGINX_DIR, "verify");
+    fs.mkdirSync(verifyDir, { recursive: true });
+    const siteConf = path.join(verifyDir, `${report.project}.conf`);
     generateNginxConf({
       services: servicesWithTls,
       certs,
