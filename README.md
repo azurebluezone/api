@@ -67,9 +67,38 @@ sudo bash scripts/build/install-nginx.sh    # installs it and reloads nginx
 
 | Document | What it answers |
 | --- | --- |
+| [docs/CLIENTS.md](docs/CLIENTS.md) | which clients can use this, who trusts it, and what we do not do |
 | [CONVENTIONS.md](CONVENTIONS.md) | how the code is written, and where each concern lives |
 | [docs/HEADERS.md](docs/HEADERS.md) | the header and session contract for clients |
 | [README.md](README.md) | the full system description |
+
+---
+
+## Connect a client
+
+The public host speaks MCP over HTTP and the OpenAI chat API, with a
+publicly trusted certificate (Let's Encrypt) - a client installs nothing.
+
+```bash
+# MCP (VS Code .vscode/mcp.json, Cursor, Zed, JetBrains)
+POST https://api.infiniteearningzone.com/mcp
+
+# OpenAI-compatible (Continue, Cline, Roo, Aider, Open WebUI, LM Studio)
+Base URL: https://api.infiniteearningzone.com/v1
+```
+
+```json
+{
+  "servers": {
+    "zombiecoder": {
+      "type": "http",
+      "url": "https://api.infiniteearningzone.com/mcp"
+    }
+  }
+}
+```
+
+How to check it instead of believing it: [docs/CLIENTS.md](docs/CLIENTS.md).
 
 ---
 
